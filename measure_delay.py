@@ -5,6 +5,7 @@ import pandas as pd
 import ast
 import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def get_latest_timestamp(api_key, metric, asset='BTC', interval='24h'):
     """
@@ -30,7 +31,7 @@ def get_latest_timestamp(api_key, metric, asset='BTC', interval='24h'):
         return None
 
 # Load your API key
-API_KEY = "YOUR_GLASSNODE_API_KEY_HERE"  # Replace with your key
+API_KEY = ""  # Replace with your key
 
 # Load CSV
 df = pd.read_csv('strategies.csv')
@@ -45,8 +46,6 @@ last_seen = {}
 current_cycle_cache = {}
 
 while True:
-    current_time = time.time()
-    dt_current = datetime.datetime.fromtimestamp(current_time, tz=datetime.timezone.utc)
 
     # Reset cache for this cycle
     current_cycle_cache.clear()
@@ -71,20 +70,30 @@ while True:
             if key_tuple not in last_seen:
                 last_seen[key_tuple] = None
 
-    # === FETCH UNIQUE ENDPOINTS ONLY ONCE PER LOOP ===
+    # === FETCH UNIQUE ENDPOINTS IN PARALLEL ===
+    futures_to_cache_key = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        for coin, endpoint, resolution in to_query:
+            cache_key = (coin, endpoint, resolution)
+            future = executor.submit(get_latest_timestamp, API_KEY, endpoint, asset=coin, interval=resolution)
+            futures_to_cache_key[future] = cache_key
+
+        for future in as_completed(futures_to_cache_key):
+            latest_t = future.result()
+            cache_key = futures_to_cache_key[future]
+            current_cycle_cache[cache_key] = latest_t
+
+    # === PROCESS RESULTS ===
     for coin, endpoint, resolution in to_query:
         cache_key = (coin, endpoint, resolution)
-        if cache_key in current_cycle_cache:
-            latest_t = current_cycle_cache[cache_key]
-        else:
-            latest_t = get_latest_timestamp(API_KEY, endpoint, asset=coin, interval=resolution)
-            current_cycle_cache[cache_key] = latest_t  # Cache result
-
+        latest_t = current_cycle_cache.get(cache_key)
         if latest_t is None:
             continue
 
         dt_latest = datetime.datetime.fromtimestamp(latest_t, tz=datetime.timezone.utc)
-        delay = current_time - latest_t
+        current_time = time.time()
+        dt_current = datetime.datetime.fromtimestamp(current_time, tz=datetime.timezone.utc)
+        delay = current_time - latest_t - 3600  # Adjust for 1 hour offset
 
         # Create log file
         safe_endpoint = endpoint.replace('/', '_')
